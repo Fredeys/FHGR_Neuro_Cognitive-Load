@@ -1,0 +1,72 @@
+{
+  "sampling": {
+    "expected_fs_hz": 250.0,
+    "fs_tolerance_fraction": 0.15,
+    "large_gap_min_seconds": 0.1,
+    "large_gap_expected_dt_factor": 5.0
+  },
+  "preprocessing": {
+    "bandpass_low_hz": 1.0,
+    "bandpass_high_hz": 40.0,
+    "bandpass_order": 4,
+    "notch_freq_hz": 50.0,
+    "notch_quality_factor": 30.0
+  },
+  "windowing": {
+    "window_seconds": 10.0,
+    "overlap": 0.5
+  },
+  "artifact_detection": {
+    "mad_factor": 3.0
+  },
+  "psd": {
+    "nperseg_max": 1024,
+    "full_signal_nperseg_max": 4096,
+    "total_power_low_hz": 1.0,
+    "total_power_high_hz": 40.0
+  },
+  "frequency_bands": {
+    "delta": [1.0, 4.0],
+    "theta": [4.0, 8.0],
+    "alpha": [8.0, 12.0],
+    "beta": [13.0, 30.0],
+    "gamma": [30.0, 40.0]
+  },
+  "baseline": {
+    "baseline_minutes": 5.0,
+    "fallback_clean_windows": 30
+  },
+  "cognitive_load_proxy": {
+    "rolling_windows": 5,
+    "load_features": [
+      "theta_alpha_ratio",
+      "beta_alpha_ratio",
+      "relative_theta",
+      "relative_alpha",
+      "spectral_entropy"
+    ],
+    "weights": {
+      "theta_alpha_ratio_z": 0.30,
+      "beta_alpha_ratio_z": 0.20,
+      "relative_theta_z": 0.20,
+      "relative_alpha_z": -0.20,
+      "spectral_entropy_z": 0.10
+    },
+    "state_threshold_std_multipliers": {
+      "elevated": 1.0,
+      "strongly_elevated": 2.0
+    },
+    "rolling_std_windows": 5
+  },
+  "external_score": {
+    "use_external_score": true,
+    "column": "nasa_tlx_score",
+    "type": "continuous",
+    "high_workload_threshold": 70.0
+  },
+  "plots": {
+    "detail_seconds": 20.0,
+    "dpi": 300,
+    "notebook_output_dir": "outputs/plots/notebook"
+  }
+}

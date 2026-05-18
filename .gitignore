@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.matplotlib_cache/
+
+data/processed/*.csv
+data/artifacts/*.csv
+data/features/*.csv
+outputs/*.json
+outputs/plots/*.html
+outputs/plots/*.png
+outputs/
+data/processed/
+data/features/
+data/artifacts/
