@@ -1,6 +1,15 @@
 # EEG Overload Project
 
+Electroencephalography (EEG) is a non-invasive method for measuring electrical brain activity in real time. EEG signals are widely used in neuroscience, cognitive science, biomedical engineering and human-computer interaction to analyze attention, cognitive workload, fatigue, stress, sleep and other neural processes.
+
+![IDUN Advertisement](src/visualization/Indun_Ad.jpeg)
+
+This project focuses on the analysis of single-channel in-ear EEG data recorded with the IDUN Guardian device. The pipeline provides a scientifically structured workflow for EEG preprocessing, artifact detection, spectral analysis, feature extraction and baseline-relative cognitive load estimation.
+
+The project is designed for exploratory EEG analysis and research-oriented cognitive load investigation using Python-based signal processing techniques.
+
 Python-Pipeline fuer IDUN/Guardian EEG-CSV-Dateien mit `timestamps` oder `timestamp` und `ch1`.
+
 
 ## Struktur
 
