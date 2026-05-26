@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from src.pipeline_config import CONFIG, load_features
+from src.scoring.state_machine import apply_cognitive_load_state_machine
 
 
 EPS = 1e-12
@@ -188,11 +189,11 @@ def assign_cognitive_load_states(
     """
     Assign adaptive states based on baseline score distribution.
 
-    baseline-nah:
+    normal:
         Score <= baseline_mean + 1 * baseline_std
-    erhöht:
+    elevated:
         Score > baseline_mean + 1 * baseline_std
-    stark erhöht:
+    strong:
         Score > baseline_mean + 2 * baseline_std
     """
     df = features_df.copy()
@@ -207,23 +208,13 @@ def assign_cognitive_load_states(
     if not np.isfinite(baseline_score_std) or baseline_score_std == 0:
         baseline_score_std = EPS
 
-    state_multipliers = PROXY_CONFIG["state_threshold_std_multipliers"]
-    elevated_threshold = baseline_score_mean + float(state_multipliers["elevated"]) * baseline_score_std
-    strongly_elevated_threshold = baseline_score_mean + float(state_multipliers["strongly_elevated"]) * baseline_score_std
-
-    df["cognitive_load_state"] = "baseline-nah"
-    df.loc[df[score_col] > elevated_threshold, "cognitive_load_state"] = "erhöht"
-    df.loc[df[score_col] > strongly_elevated_threshold, "cognitive_load_state"] = "stark erhöht"
-    df.loc[df["artifact"] == True, "cognitive_load_state"] = "artifact"
-
-    thresholds = {
-        "baseline_score_mean": baseline_score_mean,
-        "baseline_score_std": baseline_score_std,
-        "elevated_threshold": elevated_threshold,
-        "strongly_elevated_threshold": strongly_elevated_threshold,
-    }
-
-    return df, thresholds
+    return apply_cognitive_load_state_machine(
+        df,
+        baseline_score_mean=baseline_score_mean,
+        baseline_score_std=baseline_score_std,
+        score_col=score_col,
+        artifact_col="artifact",
+    )
 
 
 def plot_cognitive_load_score(
@@ -246,9 +237,9 @@ def plot_cognitive_load_score(
     x_col = "start_time" if "start_time" in df.columns else "window_id"
 
     state_colors = {
-        "baseline-nah": "#4C78A8",
-        "erhöht": "#F58518",
-        "stark erhöht": "#E45756",
+        "normal": "#4C78A8",
+        "elevated": "#F58518",
+        "strong": "#E45756",
         "artifact": "#9D9D9D",
     }
 
@@ -268,8 +259,8 @@ def plot_cognitive_load_score(
         if state_df.empty:
             continue
         ax.scatter(state_df[x_col], state_df["Cognitive_Load_Proxy_Score"], s=18, color=color, label=state)
-    ax.axhline(thresholds["elevated_threshold"], linestyle="--", color="#F58518", label="erhöht")
-    ax.axhline(thresholds["strongly_elevated_threshold"], linestyle="--", color="#E45756", label="stark erhöht")
+    ax.axhline(thresholds["elevated_threshold"], linestyle="--", color="#F58518", label="elevated")
+    ax.axhline(thresholds["strongly_elevated_threshold"], linestyle="--", color="#E45756", label="strong")
     ax.set_title("EEG Cognitive Load Proxy Score Over Time")
     ax.set_xlabel("Time" if x_col == "start_time" else "Window")
     ax.set_ylabel("Baseline-relative proxy score [z-weighted]")

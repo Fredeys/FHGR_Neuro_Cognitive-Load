@@ -132,6 +132,13 @@ def _robust_threshold(values: np.ndarray, factor: float = float(CONFIG["artifact
     return float(np.nanmedian(values) + factor * 1.4826 * _mad(values))
 
 
+def _configured_threshold(config_key: str, values: np.ndarray, threshold_factor: float) -> float:
+    configured = CONFIG["artifact_detection"].get(config_key)
+    if configured is not None:
+        return float(configured)
+    return _robust_threshold(values, threshold_factor)
+
+
 def compute_window_metrics(window: dict) -> dict:
     """
     Compute artifact metrics for one EEG window.
@@ -139,10 +146,16 @@ def compute_window_metrics(window: dict) -> dict:
     Metrics:
     - peak-to-peak amplitude
     - standard deviation
+    - variance
     - absolute maximum amplitude
     - mean signal energy
+    - sample-to-sample gradient metrics
     """
     segment = np.asarray(window["signal_segment"], dtype=float)
+    abs_gradients = np.abs(np.diff(segment))
+    max_abs_gradient = float(np.max(abs_gradients)) if abs_gradients.size else 0.0
+    mean_abs_gradient = float(np.mean(abs_gradients)) if abs_gradients.size else 0.0
+    gradient_p95 = float(np.percentile(abs_gradients, 95)) if abs_gradients.size else 0.0
 
     return {
         "window_id": window["window_id"],
@@ -152,8 +165,12 @@ def compute_window_metrics(window: dict) -> dict:
         "end_time": window["end_time"],
         "p2p": float(np.ptp(segment)),
         "std": float(np.std(segment)),
+        "variance": float(np.var(segment)),
         "max_abs": float(np.max(np.abs(segment))),
         "energy": float(np.mean(segment**2)),
+        "max_abs_gradient": max_abs_gradient,
+        "mean_abs_gradient": mean_abs_gradient,
+        "gradient_p95": gradient_p95,
     }
 
 
@@ -172,17 +189,21 @@ def detect_artifacts(
     artifact_df = pd.DataFrame([compute_window_metrics(window) for window in windows])
 
     thresholds = {
-        "p2p_threshold": _robust_threshold(artifact_df["p2p"].to_numpy(), threshold_factor),
-        "std_threshold": _robust_threshold(artifact_df["std"].to_numpy(), threshold_factor),
-        "max_abs_threshold": _robust_threshold(artifact_df["max_abs"].to_numpy(), threshold_factor),
-        "energy_threshold": _robust_threshold(artifact_df["energy"].to_numpy(), threshold_factor),
+        "p2p_threshold": _configured_threshold("peak_to_peak_threshold", artifact_df["p2p"].to_numpy(), threshold_factor),
+        "std_threshold": _configured_threshold("std_threshold", artifact_df["std"].to_numpy(), threshold_factor),
+        "variance_threshold": _configured_threshold("variance_threshold", artifact_df["variance"].to_numpy(), threshold_factor),
+        "max_abs_threshold": _configured_threshold("absolute_amplitude_threshold", artifact_df["max_abs"].to_numpy(), threshold_factor),
+        "energy_threshold": _configured_threshold("energy_threshold", artifact_df["energy"].to_numpy(), threshold_factor),
+        "gradient_threshold": _configured_threshold("gradient_threshold", artifact_df["max_abs_gradient"].to_numpy(), threshold_factor),
     }
 
     artifact_df["artifact"] = (
         (artifact_df["p2p"] > thresholds["p2p_threshold"])
         | (artifact_df["std"] > thresholds["std_threshold"])
+        | (artifact_df["variance"] > thresholds["variance_threshold"])
         | (artifact_df["max_abs"] > thresholds["max_abs_threshold"])
         | (artifact_df["energy"] > thresholds["energy_threshold"])
+        | (artifact_df["max_abs_gradient"] > thresholds["gradient_threshold"])
     )
 
     report = {

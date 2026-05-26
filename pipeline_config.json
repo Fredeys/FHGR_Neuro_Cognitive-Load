@@ -16,8 +16,35 @@
     "window_seconds": 10.0,
     "overlap": 0.5
   },
+  "epoching": {
+    "enabled": false,
+    "epoch_seconds": 1.0,
+    "overlap": 0.0
+  },
+  "resampling": {
+    "enabled": false,
+    "target_fs_hz": null,
+    "anti_aliasing": {
+      "enabled": true,
+      "lowpass_hz": null,
+      "order": 4
+    }
+  },
   "artifact_detection": {
-    "mad_factor": 3.0
+    "mad_factor": 3.0,
+    "absolute_amplitude_threshold": null,
+    "peak_to_peak_threshold": null,
+    "std_threshold": null,
+    "variance_threshold": null,
+    "energy_threshold": null,
+    "gradient_threshold": null,
+    "spectral_high_freq_ratio_threshold": null,
+    "mark_only": true
+  },
+  "rejection_policy": {
+    "exclude_artifacts_from_features": true,
+    "exclude_artifacts_from_baseline": true,
+    "exclude_artifacts_from_score": true
   },
   "psd": {
     "nperseg_max": 1024,
@@ -58,11 +85,30 @@
     },
     "rolling_std_windows": 5
   },
+  "hysteresis": {
+    "enabled": true,
+    "cognitive_load": {
+      "enter_elevated_std": 1.0,
+      "exit_elevated_std": 0.7,
+      "enter_strong_std": 2.0,
+      "exit_strong_std": 1.5
+    }
+  },
+  "refractory": {
+    "enabled": true,
+    "state_change_refractory_windows": 2,
+    "artifact_refractory_seconds": 2.0
+  },
   "external_score": {
+    "enabled": true,
     "use_external_score": true,
     "column": "nasa_tlx_score",
     "type": "continuous",
-    "high_workload_threshold": 70.0
+    "high_workload_threshold": 70.0,
+    "use_for_calibration": false,
+    "use_as_feature": false,
+    "export_with_features": false,
+    "export_validation_file": true
   },
   "plots": {
     "detail_seconds": 20.0,

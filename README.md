@@ -8,10 +8,9 @@ This project focuses on the analysis of single-channel in-ear EEG data recorded 
 
 The project is designed for exploratory EEG analysis and research-oriented cognitive load investigation using Python-based signal processing techniques.
 
-Python-Pipeline fuer IDUN/Guardian EEG-CSV-Dateien mit `timestamps` oder `timestamp` und `ch1`.
+Python pipeline for IDUN/Guardian EEG CSV files with `timestamps` or `timestamp` and `ch1`.
 
-
-## Struktur
+## Structure
 
 ```text
 EEG_Overload_Project/
@@ -38,29 +37,29 @@ EEG_Overload_Project/
 └── 06_cognitive_load_proxy.py
 ```
 
-## Ausfuehrung
+## Execution
 
-Die Hauptpipeline ist `01_ordered_eeg_pipeline.py`. `00_run_pipeline.py` ist nur
-ein duenner Wrapper darauf.
+The main pipeline is `01_ordered_eeg_pipeline.py`. `00_run_pipeline.py` is only
+a thin wrapper around it.
 
 ```bash
 cd EEG_Overload_Project
 python 01_ordered_eeg_pipeline.py eeg_Work_PC_Morning.csv
 ```
 
-Plots werden als PNG gespeichert. Optional kannst du sie zusaetzlich anzeigen:
+Plots are saved as PNG files. They can optionally be displayed as well:
 
 ```bash
 python 01_ordered_eeg_pipeline.py eeg_Work_PC_Morning.csv --show-plots
 ```
 
-Optional ohne externe Score-Validierung:
+Run without external score validation:
 
 ```bash
 python 01_ordered_eeg_pipeline.py eeg_Work_PC_Morning.csv --no-external-score
 ```
 
-Optional mit anderer Baseline-Laenge:
+Run with a different baseline duration:
 
 ```bash
 python 01_ordered_eeg_pipeline.py eeg_Work_PC_Morning.csv --baseline-minutes 3
@@ -68,52 +67,85 @@ python 01_ordered_eeg_pipeline.py eeg_Work_PC_Morning.csv --baseline-minutes 3
 
 ## Outputs
 
-- `data/processed/*_processed_signal.csv`
+- `data/processed/*_cleaned_filtered_signal.csv`
 - `data/artifacts/*_artifact_windows.csv`
-- `data/features/*_features.csv`
+- `data/artifacts/*_qc_epochs.csv` if optional epoching is enabled
+- `data/features/*_features_eeg_only.csv`
+- `data/features/*_scores_eeg_only.csv`
+- `data/features/*_validation_external_score.csv` if an external score is available
 - `outputs/*_summary.json`
 - `outputs/plots/*.png`
 
-## Externe Workload-Scores
+## Pipeline Logic
 
-Zentrale Parameter liegen in:
+The pipeline does not use a single raw FFT as its main method. Frequency
+features are computed with Welch PSD. Welch is FFT-based, but averages across
+segments and is more stable for EEG bandpower than one FFT over the full window.
+
+Anti-aliasing is not active by default because the pipeline does not downsample
+by default. Optional resampling is implemented and disabled in the config. If it
+is enabled, an anti-aliasing low-pass filter is applied before downsampling.
+
+The main features are computed from 10-second windows with overlap. These
+windows are the basis for artifact marking, Welch PSD, bandpower and the
+cognitive-load proxy. Optional 1-second epoching is intended separately for QC
+and finer artifact inspection; it does not replace the 10-second feature
+windows.
+
+ICA is not implemented. For the current single-channel IDUN/Guardian setup, ICA
+is not technically meaningful because ICA typically requires multiple channels
+for component separation.
+
+## External Workload Scores
+
+Central parameters are defined in:
 
 ```text
 pipeline_config.json
 ```
 
-Dort werden Samplingrate, Filter, Fensterlaenge, PSD, Baseline, Proxy-Score und
-externer Score gepflegt. Die Python-Pipeline und das Notebook lesen dieselbe
-Config.
+Sampling rate, filters, window length, PSD, baseline, proxy score and external
+score settings are maintained there. The Python pipeline and the notebook read
+the same config.
 
-Die vollständige Analysepipeline `01_ordered_eeg_pipeline.py` unterstützt optional eine
-externe Referenzspalte. Die Default-Config ist:
+The full analysis pipeline `01_ordered_eeg_pipeline.py` optionally supports an
+external reference column. The default config is:
 
 ```json
 "external_score": {
-  "use_external_score": true,
+  "enabled": true,
   "column": "nasa_tlx_score",
   "type": "continuous",
-  "high_workload_threshold": 70.0
+  "high_workload_threshold": 70.0,
+  "use_for_calibration": false,
+  "use_as_feature": false,
+  "export_with_features": false,
+  "export_validation_file": true
 }
 ```
 
-Wenn `nasa_tlx_score` in der CSV vorhanden ist, wird der Score pro Fenster
-aggregiert und nur zur externen Validierung des `Cognitive_Load_Proxy_Score`
-genutzt. Er wird nicht als EEG-Merkmal verwendet. Ohne externe Referenz wird kein
-Cognitive Overload behauptet.
+If `nasa_tlx_score` is present in the CSV, the score is aggregated per window
+and used only for external validation of the `Cognitive_Load_Proxy_Score`. It is
+not used as an EEG feature, does not enter the baseline, does not enter
+z-normalization and does not enter the cognitive-load score. Without an external
+reference, the pipeline does not claim cognitive overload.
 
 ## Notebook
 
-Die visuelle Gesamtanalyse liegt hier:
+The visual full-pipeline analysis is located here:
 
 ```text
 notebooks/01_full_pipeline_visual_analysis.ipynb
 ```
 
-Das Notebook liest Dateien aus `data/raw/`, erzeugt Matplotlib-Visualisierungen
-und speichert wichtige PNGs unter:
+The notebook reads files from `data/raw/`, creates Matplotlib visualizations and
+saves important PNG files under:
 
 ```text
 outputs/plots/notebook/
 ```
+
+## Disclaimer
+
+Codex was used as a development and documentation assistance tool for this
+project.

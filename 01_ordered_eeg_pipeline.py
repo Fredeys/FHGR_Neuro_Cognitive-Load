@@ -15,18 +15,20 @@ The processing order follows the requested scientific sequence exactly:
 9. Bandpass: 1-40 Hz
 10. Notch: 50 Hz
 11. gefiltertes Signal visualisieren
-12. Fensterbildung: 10 Sekunden, 50 % Overlap
-13. Artefakt-Metriken pro Fenster berechnen
-14. Artefaktfenster markieren
-15. PSD mit Welch nur für gültige Fenster berechnen
-16. Bandpower berechnen
-17. relative Bandpower berechnen
-18. Ratios berechnen
-19. optionale Baseline-Normalisierung
-20. Cognitive Load Proxy Score berechnen
-21. Score glätten
-22. Feature-/Score-Tabelle erzeugen
-23. Export
+12. optionales Resampling mit Anti-Aliasing
+13. optionales 1s-Epoching fuer QC
+14. Feature-Fensterbildung: 10 Sekunden, 50 % Overlap
+15. Artefakt-Metriken pro Fenster berechnen
+16. Artefaktfenster markieren
+17. PSD mit Welch nur für gültige Fenster berechnen
+18. Bandpower berechnen
+19. relative Bandpower berechnen
+20. Ratios berechnen
+21. optionale Baseline-Normalisierung
+22. Cognitive Load Proxy Score berechnen
+23. Score glätten
+24. Feature-/Score-Tabelle erzeugen
+25. Export
 
 Methodological notes:
 - Welch PSD is used instead of raw FFT.
@@ -60,6 +62,9 @@ from scipy.signal import butter, filtfilt, iirnotch, sosfiltfilt, welch
 from scipy.stats import kurtosis, pearsonr, skew, spearmanr
 
 from src.pipeline_config import CONFIG, frequency_bands, load_features
+from src.preprocessing.epoching import create_epochs
+from src.preprocessing.resampling import maybe_resample_signal
+from src.scoring.state_machine import apply_cognitive_load_state_machine
 
 
 EPS = 1e-12
@@ -74,6 +79,7 @@ SUMMARY_DIR = PROJECT_ROOT / "outputs"
 SAMPLING_CONFIG = CONFIG["sampling"]
 PREPROCESSING_CONFIG = CONFIG["preprocessing"]
 WINDOWING_CONFIG = CONFIG["windowing"]
+EPOCHING_CONFIG = CONFIG.get("epoching", {})
 ARTIFACT_CONFIG = CONFIG["artifact_detection"]
 PSD_CONFIG = CONFIG["psd"]
 BASELINE_CONFIG = CONFIG["baseline"]
@@ -84,10 +90,13 @@ PLOT_CONFIG = CONFIG["plots"]
 EXPECTED_FS = float(SAMPLING_CONFIG["expected_fs_hz"])
 FREQUENCY_BANDS = frequency_bands()
 LOAD_FEATURES = load_features()
-USE_EXTERNAL_SCORE = bool(EXTERNAL_SCORE_CONFIG["use_external_score"])
+USE_EXTERNAL_SCORE = bool(EXTERNAL_SCORE_CONFIG.get("enabled", EXTERNAL_SCORE_CONFIG.get("use_external_score", True)))
 EXTERNAL_SCORE_COLUMN = str(EXTERNAL_SCORE_CONFIG["column"])
 EXTERNAL_SCORE_TYPE = str(EXTERNAL_SCORE_CONFIG["type"])
 HIGH_WORKLOAD_THRESHOLD = float(EXTERNAL_SCORE_CONFIG["high_workload_threshold"])
+EXTERNAL_SCORE_USE_AS_FEATURE = bool(EXTERNAL_SCORE_CONFIG.get("use_as_feature", False))
+EXTERNAL_SCORE_EXPORT_WITH_FEATURES = bool(EXTERNAL_SCORE_CONFIG.get("export_with_features", False))
+EXTERNAL_SCORE_EXPORT_VALIDATION_FILE = bool(EXTERNAL_SCORE_CONFIG.get("export_validation_file", True))
 BANDPASS_LOW_HZ = float(PREPROCESSING_CONFIG["bandpass_low_hz"])
 BANDPASS_HIGH_HZ = float(PREPROCESSING_CONFIG["bandpass_high_hz"])
 BANDPASS_ORDER = int(PREPROCESSING_CONFIG["bandpass_order"])
@@ -159,6 +168,9 @@ def run_ordered_eeg_pipeline(
             "EXTERNAL_SCORE_COLUMN": external_score_column,
             "EXTERNAL_SCORE_TYPE": external_score_type,
             "HIGH_WORKLOAD_THRESHOLD": float(high_workload_threshold),
+            "USE_AS_FEATURE": bool(EXTERNAL_SCORE_USE_AS_FEATURE),
+            "EXPORT_WITH_FEATURES": bool(EXTERNAL_SCORE_EXPORT_WITH_FEATURES),
+            "EXPORT_VALIDATION_FILE": bool(EXTERNAL_SCORE_EXPORT_VALIDATION_FILE),
         },
     }
 
@@ -272,25 +284,59 @@ def run_ordered_eeg_pipeline(
     _plot_raw_vs_filtered(df, plots_dir / "raw_vs_filtered.png")
     _plot_psd_before_after_filtering(df, fs, plots_dir / "psd_before_after_filtering.png")
 
-    # 12. Fensterbildung: 10 Sekunden, 50 % Overlap
-    print("\n12. Fensterbildung")
+    # 12. optionales Resampling mit Anti-Aliasing
+    print("\n12. Optionales Resampling mit Anti-Aliasing")
+    df, fs, resampling_report = maybe_resample_signal(df, fs, signal_col="ch1_filtered")
+    summary["step_12_resampling"] = resampling_report
+    if resampling_report.get("applied"):
+        print(f"Resampling angewendet: {resampling_report['source_fs_hz']:.2f} Hz -> {fs:.2f} Hz")
+    else:
+        print("Resampling deaktiviert oder übersprungen.")
+
+    # 13. optionales 1s-Epoching fuer QC
+    print("\n13. Optionales 1s-Epoching fuer QC")
+    epoch_df = pd.DataFrame()
+    if bool(EPOCHING_CONFIG.get("enabled", False)):
+        epochs = create_epochs(
+            df,
+            fs,
+            signal_col="ch1_filtered",
+            epoch_seconds=float(EPOCHING_CONFIG.get("epoch_seconds", 1.0)),
+            overlap=float(EPOCHING_CONFIG.get("overlap", 0.0)),
+        )
+        epoch_df = _epochs_to_qc_dataframe(epochs)
+        summary["step_13_epoching"] = {
+            "enabled": True,
+            "epoch_seconds": float(EPOCHING_CONFIG.get("epoch_seconds", 1.0)),
+            "overlap": float(EPOCHING_CONFIG.get("overlap", 0.0)),
+            "n_epochs": int(len(epoch_df)),
+        }
+        print(f"QC-Epochen erzeugt: {len(epoch_df)}")
+    else:
+        summary["step_13_epoching"] = {"enabled": False}
+        print("Epoching deaktiviert.")
+
+    # 14. Feature-Fensterbildung: 10 Sekunden, 50 % Overlap
+    print("\n14. Feature-Fensterbildung")
     windows = _create_windows(df, fs, window_seconds=WINDOW_SECONDS, overlap=WINDOW_OVERLAP)
-    summary["step_12_n_windows"] = int(len(windows))
+    summary["step_14_n_windows"] = int(len(windows))
     print(f"Anzahl erzeugter Fenster: {len(windows)}")
 
-    # 13. Artefakt-Metriken pro Fenster berechnen
-    print("\n13. Artefakt-Metriken pro Fenster berechnen")
+    # 15. Artefakt-Metriken pro Fenster berechnen
+    print("\n15. Artefakt-Metriken pro Fenster berechnen")
     artifact_df = pd.DataFrame([_compute_artifact_metrics(win) for win in windows])
     print(f"Artefakt-Metriken berechnet für {len(artifact_df)} Fenster.")
 
-    # 14. Artefaktfenster markieren
-    print("\n14. Artefaktfenster markieren")
+    # 16. Artefaktfenster markieren
+    print("\n16. Artefaktfenster markieren")
     artifact_thresholds = _artifact_thresholds(artifact_df)
     artifact_df["artifact"] = (
         (artifact_df["p2p"] > artifact_thresholds["p2p_threshold"])
         | (artifact_df["std"] > artifact_thresholds["std_threshold"])
+        | (artifact_df["variance"] > artifact_thresholds["variance_threshold"])
         | (artifact_df["max_abs"] > artifact_thresholds["max_abs_threshold"])
         | (artifact_df["energy"] > artifact_thresholds["energy_threshold"])
+        | (artifact_df["max_abs_gradient"] > artifact_thresholds["gradient_threshold"])
     )
     summary["step_14_artifacts"] = {
         **artifact_thresholds,
@@ -305,8 +351,8 @@ def run_ordered_eeg_pipeline(
     print(f"Anzahl gültiger Fenster: {n_valid}")
     _plot_artifact_windows(artifact_df, plots_dir / "artifact_windows.png")
 
-    # 15. PSD mit Welch nur für gültige Fenster berechnen
-    print("\n15. PSD mit Welch nur für gültige Fenster berechnen")
+    # 17. PSD mit Welch nur für gültige Fenster berechnen
+    print("\n17. PSD mit Welch nur für gültige Fenster berechnen")
     psd_rows = []
     artifact_lookup = artifact_df.set_index("window_id")["artifact"].to_dict()
     for win in windows:
@@ -323,8 +369,8 @@ def run_ordered_eeg_pipeline(
     psd_df = pd.DataFrame(psd_rows)
     print(f"Anzahl berechneter PSDs: {len(psd_df)}")
 
-    # 16. Bandpower berechnen
-    print("\n16. Bandpower berechnen")
+    # 18. Bandpower berechnen
+    print("\n18. Bandpower berechnen")
     feature_rows = []
     for _, row in psd_df.iterrows():
         absolute = {
@@ -333,13 +379,13 @@ def run_ordered_eeg_pipeline(
         }
         total_power = _bandpower(row["freqs"], row["psd"], TOTAL_POWER_BAND)
 
-        # 17. relative Bandpower berechnen
+        # 19. relative Bandpower berechnen
         relative = {
             f"relative_{name}": absolute[f"absolute_{name}"] / (total_power + EPS)
             for name in FREQUENCY_BANDS
         }
 
-        # 18. Ratios berechnen
+        # 20. Ratios berechnen
         ratios = {
             "theta_alpha_ratio": absolute["absolute_theta"] / (absolute["absolute_alpha"] + EPS),
             "alpha_theta_ratio": absolute["absolute_alpha"] / (absolute["absolute_theta"] + EPS),
@@ -371,13 +417,13 @@ def run_ordered_eeg_pipeline(
 
     clean_features_df = pd.DataFrame(feature_rows)
     print(f"Absolute Bandpower berechnet für {len(clean_features_df)} gültige Fenster.")
-    print("\n17. Relative Bandpower berechnen")
+    print("\n19. Relative Bandpower berechnen")
     print("Relative Bandpower berechnet.")
-    print("\n18. Ratios berechnen")
+    print("\n20. Ratios berechnen")
     print("Theta/Alpha, Alpha/Theta und Beta/Alpha Ratios berechnet.")
 
-    # 19. optionale Baseline-Normalisierung
-    print("\n19. Optionale Baseline-Normalisierung")
+    # 21. optionale Baseline-Normalisierung
+    print("\n21. Optionale Baseline-Normalisierung")
     clean_features_df, baseline_report = _baseline_normalize(clean_features_df, baseline_minutes)
     summary["step_19_baseline"] = baseline_report
     print(
@@ -386,15 +432,15 @@ def run_ordered_eeg_pipeline(
         f"({baseline_report['baseline_windows']} Fenster)"
     )
 
-    # 20. Cognitive Load Proxy Score berechnen
-    print("\n20. Cognitive Load Proxy Score berechnen")
+    # 22. Cognitive Load Proxy Score berechnen
+    print("\n22. Cognitive Load Proxy Score berechnen")
     clean_features_df["Cognitive_Load_Proxy_Score"] = _compute_proxy_score(clean_features_df)
     clean_features_df, score_thresholds = _assign_load_states(clean_features_df)
     summary["step_20_score_thresholds"] = score_thresholds
     print("Cognitive Load Score berechnet.")
 
-    # 21. Score glätten
-    print("\n21. Score glätten")
+    # 23. Score glätten
+    print("\n23. Score glätten")
     if not 3 <= rolling_windows <= 6:
         raise ValueError("rolling_windows muss zwischen 3 und 6 liegen.")
     clean_features_df["Cognitive_Load_Proxy_Score_Smoothed"] = (
@@ -404,8 +450,8 @@ def run_ordered_eeg_pipeline(
     )
     print(f"Cognitive Load Score geglättet mit Rolling Mean über {rolling_windows} Fenster.")
 
-    # 22. Feature-/Score-Tabelle erzeugen
-    print("\n22. Feature-/Score-Tabelle erzeugen")
+    # 24. Feature-/Score-Tabelle erzeugen
+    print("\n24. Feature-/Score-Tabelle erzeugen")
     artifact_feature_rows = artifact_df[artifact_df["artifact"]][
         ["window_id", "start_sample", "end_sample", "start_time", "end_time", "artifact"]
     ].copy()
@@ -416,7 +462,7 @@ def run_ordered_eeg_pipeline(
     features_df, deviation_report = _add_eeg_deviation_index(features_df)
 
     if external_score_available:
-        print("\n22b. Externen Workload-Score pro Fenster zuordnen und validieren")
+        print("\n24b. Externen Workload-Score pro Fenster zuordnen und validieren")
         features_df, external_report = _attach_and_validate_external_score(
             signal_df=df,
             features_df=features_df,
@@ -437,20 +483,18 @@ def run_ordered_eeg_pipeline(
             "message": "Kein externer Workload-Score vorhanden. Pipeline wurde ohne externe Validierung ausgefuehrt.",
         }
 
-    score_df = features_df[
-        [col for col in [
-            "window_id",
-            "start_time",
-            "end_time",
-            "artifact",
-            "Cognitive_Load_Proxy_Score",
-            "Cognitive_Load_Proxy_Score_Smoothed",
-            "cognitive_load_state",
-            external_score_column,
-            "high_workload",
-            "predicted_high_workload_proxy",
-        ] if col in features_df.columns]
-    ].copy()
+    features_eeg_only_df = _make_eeg_only_features(
+        features_df,
+        external_score_column=external_score_column,
+        export_with_features=EXTERNAL_SCORE_EXPORT_WITH_FEATURES,
+        use_as_feature=EXTERNAL_SCORE_USE_AS_FEATURE,
+    )
+    scores_eeg_only_df = _make_eeg_only_scores(features_df)
+    validation_df = _make_external_validation_table(
+        features_df,
+        external_report=summary["external_score_validation"],
+        external_score_column=external_score_column,
+    )
     print(f"Anzahl erzeugter Feature-Zeilen: {len(features_df)}")
     _plot_bandpower_over_time(clean_features_df, plots_dir / "bandpower_over_time.png")
     _plot_cognitive_load_score(clean_features_df, plots_dir / "cognitive_load_score.png")
@@ -469,8 +513,8 @@ def run_ordered_eeg_pipeline(
     for path in report_paths.values():
         print("Gespeichert:", path)
 
-    # 23. Export
-    print("\n23. Export")
+    # 25. Export
+    print("\n25. Export")
     processed_dir.mkdir(parents=True, exist_ok=True)
     features_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -479,24 +523,40 @@ def run_ordered_eeg_pipeline(
     reports_dir.mkdir(parents=True, exist_ok=True)
     signal_path = processed_dir / f"{prefix}_cleaned_filtered_signal.csv"
     artifact_path = artifacts_dir / f"{prefix}_artifact_windows.csv"
-    features_path = features_dir / f"{prefix}_features_scores.csv"
-    score_path = features_dir / f"{prefix}_score_table.csv"
+    epoch_path = artifacts_dir / f"{prefix}_qc_epochs.csv"
+    features_path = features_dir / f"{prefix}_features_eeg_only.csv"
+    score_path = features_dir / f"{prefix}_scores_eeg_only.csv"
+    validation_path = features_dir / f"{prefix}_validation_external_score.csv"
     summary_path = summary_dir / f"{prefix}_summary.json"
 
     df.to_csv(signal_path, index=False)
     print("Gespeichert:", signal_path)
     artifact_df.to_csv(artifact_path, index=False)
     print("Gespeichert:", artifact_path)
-    features_df.to_csv(features_path, index=False)
+    epoch_exported = not epoch_df.empty
+    if epoch_exported:
+        epoch_df.to_csv(epoch_path, index=False)
+        print("Gespeichert:", epoch_path)
+    features_eeg_only_df.to_csv(features_path, index=False)
     print("Gespeichert:", features_path)
-    score_df.to_csv(score_path, index=False)
+    scores_eeg_only_df.to_csv(score_path, index=False)
     print("Gespeichert:", score_path)
+    validation_exported = bool(
+        EXTERNAL_SCORE_EXPORT_VALIDATION_FILE
+        and validation_df is not None
+        and not validation_df.empty
+    )
+    if validation_exported:
+        validation_df.to_csv(validation_path, index=False)
+        print("Gespeichert:", validation_path)
 
     summary["exports"] = {
         "cleaned_filtered_signal": str(signal_path),
         "artifact_windows": str(artifact_path),
-        "features_scores": str(features_path),
-        "score_table": str(score_path),
+        "qc_epochs": str(epoch_path) if epoch_exported else None,
+        "features_eeg_only": str(features_path),
+        "scores_eeg_only": str(score_path),
+        "validation_external_score": str(validation_path) if validation_exported else None,
         "extended_analysis_report_txt": str(report_paths["txt"]),
         "extended_analysis_report_json": str(report_paths["json"]),
     }
@@ -517,6 +577,105 @@ def run_ordered_eeg_pipeline(
     print("\nPipeline abgeschlossen.")
 
     return df, artifact_df, features_df, summary
+
+
+def _validation_columns(external_score_column: str) -> set[str]:
+    return {
+        external_score_column,
+        "high_workload",
+        "predicted_high_workload_proxy",
+    }
+
+
+def _make_eeg_only_features(
+    features_df: pd.DataFrame,
+    external_score_column: str,
+    export_with_features: bool,
+    use_as_feature: bool,
+) -> pd.DataFrame:
+    """Return feature exports that cannot silently include external scores."""
+    eeg_df = features_df.copy()
+    if not export_with_features or not use_as_feature:
+        eeg_df = eeg_df.drop(columns=list(_validation_columns(external_score_column)), errors="ignore")
+    return eeg_df
+
+
+def _make_eeg_only_scores(features_df: pd.DataFrame) -> pd.DataFrame:
+    score_cols = [
+        "window_id",
+        "start_time",
+        "end_time",
+        "artifact",
+        "Cognitive_Load_Proxy_Score",
+        "Cognitive_Load_Proxy_Score_Smoothed",
+        "score_z",
+        "cognitive_load_state_raw",
+        "cognitive_load_state_hysteresis",
+        "cognitive_load_state",
+    ]
+    score_df = features_df[[col for col in score_cols if col in features_df.columns]].copy()
+    return score_df.rename(
+        columns={
+            "Cognitive_Load_Proxy_Score": "cognitive_load_score",
+            "Cognitive_Load_Proxy_Score_Smoothed": "cognitive_load_score_smoothed",
+            "score_z": "cognitive_load_score_z",
+        }
+    )
+
+
+def _make_external_validation_table(
+    features_df: pd.DataFrame,
+    external_report: dict,
+    external_score_column: str,
+) -> pd.DataFrame | None:
+    if not external_report.get("available", False) or external_score_column not in features_df.columns:
+        return None
+
+    validation_cols = [
+        "window_id",
+        "start_time",
+        "end_time",
+        "Cognitive_Load_Proxy_Score",
+        "Cognitive_Load_Proxy_Score_Smoothed",
+        "cognitive_load_state",
+        external_score_column,
+        "high_workload",
+        "predicted_high_workload_proxy",
+    ]
+    validation_df = features_df[[col for col in validation_cols if col in features_df.columns]].copy()
+    validation_df = validation_df.rename(
+        columns={
+            "Cognitive_Load_Proxy_Score": "cognitive_load_score",
+            "Cognitive_Load_Proxy_Score_Smoothed": "cognitive_load_score_smoothed",
+        }
+    )
+
+    metrics = external_report.get("continuous_metrics", {})
+    for key in ["pearson_r", "pearson_p", "spearman_rho", "spearman_p"]:
+        if key in metrics:
+            validation_df[f"validation_{key}"] = metrics[key]
+    return validation_df
+
+
+def _epochs_to_qc_dataframe(epochs: list[dict]) -> pd.DataFrame:
+    rows = []
+    for epoch in epochs:
+        signal = np.asarray(epoch["signal_segment"], dtype=float)
+        rows.append(
+            {
+                "epoch_id": int(epoch["epoch_id"]),
+                "start_sample": int(epoch["start_sample"]),
+                "end_sample": int(epoch["end_sample"]),
+                "start_time": epoch["start_time"],
+                "end_time": epoch["end_time"],
+                "p2p": float(np.ptp(signal)),
+                "std": float(np.std(signal)),
+                "variance": float(np.var(signal)),
+                "max_abs": float(np.max(np.abs(signal))),
+                "energy": float(np.mean(signal**2)),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _validate_columns(df: pd.DataFrame) -> str:
@@ -1261,7 +1420,7 @@ def _high_load_phase_metrics(clean_df: pd.DataFrame) -> dict:
     sorted_df = clean_df.sort_values("window_id")
 
     for _, row in sorted_df.iterrows():
-        is_high = row.get("cognitive_load_state") == "stark erhöht"
+        is_high = row.get("cognitive_load_state") == "strong"
         if is_high:
             current_rows.append(row)
         elif current_rows:
@@ -1640,12 +1799,20 @@ def _create_windows(df: pd.DataFrame, fs: float, window_seconds: float, overlap:
 
 def _compute_artifact_metrics(window: dict) -> dict:
     signal = window["signal_segment"]
+    abs_gradients = np.abs(np.diff(signal))
+    max_abs_gradient = float(np.max(abs_gradients)) if abs_gradients.size else 0.0
+    mean_abs_gradient = float(np.mean(abs_gradients)) if abs_gradients.size else 0.0
+    gradient_p95 = float(np.percentile(abs_gradients, 95)) if abs_gradients.size else 0.0
     return {
         **_window_metadata(window),
         "p2p": float(np.ptp(signal)),
         "std": float(np.std(signal)),
+        "variance": float(np.var(signal)),
         "max_abs": float(np.max(np.abs(signal))),
         "energy": float(np.mean(signal**2)),
+        "max_abs_gradient": max_abs_gradient,
+        "mean_abs_gradient": mean_abs_gradient,
+        "gradient_p95": gradient_p95,
     }
 
 
@@ -1661,11 +1828,20 @@ def _window_metadata(window: dict) -> dict:
 
 def _artifact_thresholds(artifact_df: pd.DataFrame) -> dict:
     return {
-        "p2p_threshold": _robust_threshold(artifact_df["p2p"]),
-        "std_threshold": _robust_threshold(artifact_df["std"]),
-        "max_abs_threshold": _robust_threshold(artifact_df["max_abs"]),
-        "energy_threshold": _robust_threshold(artifact_df["energy"]),
+        "p2p_threshold": _configured_artifact_threshold("peak_to_peak_threshold", artifact_df["p2p"]),
+        "std_threshold": _configured_artifact_threshold("std_threshold", artifact_df["std"]),
+        "variance_threshold": _configured_artifact_threshold("variance_threshold", artifact_df["variance"]),
+        "max_abs_threshold": _configured_artifact_threshold("absolute_amplitude_threshold", artifact_df["max_abs"]),
+        "energy_threshold": _configured_artifact_threshold("energy_threshold", artifact_df["energy"]),
+        "gradient_threshold": _configured_artifact_threshold("gradient_threshold", artifact_df["max_abs_gradient"]),
     }
+
+
+def _configured_artifact_threshold(config_key: str, values: pd.Series | np.ndarray) -> float:
+    configured = ARTIFACT_CONFIG.get(config_key)
+    if configured is not None:
+        return float(configured)
+    return _robust_threshold(values)
 
 
 def _robust_threshold(values: pd.Series | np.ndarray, factor: float = float(ARTIFACT_CONFIG["mad_factor"])) -> float:
@@ -1730,18 +1906,13 @@ def _assign_load_states(features_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     std = float(baseline_scores.std())
     if not np.isfinite(std) or std == 0:
         std = EPS
-    state_multipliers = PROXY_CONFIG["state_threshold_std_multipliers"]
-    elevated = mean + float(state_multipliers["elevated"]) * std
-    strongly = mean + float(state_multipliers["strongly_elevated"]) * std
-    df["cognitive_load_state"] = "baseline-nah"
-    df.loc[df["Cognitive_Load_Proxy_Score"] > elevated, "cognitive_load_state"] = "erhöht"
-    df.loc[df["Cognitive_Load_Proxy_Score"] > strongly, "cognitive_load_state"] = "stark erhöht"
-    return df, {
-        "baseline_score_mean": mean,
-        "baseline_score_std": std,
-        "elevated_threshold": elevated,
-        "strongly_elevated_threshold": strongly,
-    }
+    return apply_cognitive_load_state_machine(
+        df,
+        baseline_score_mean=mean,
+        baseline_score_std=std,
+        score_col="Cognitive_Load_Proxy_Score",
+        artifact_col="artifact",
+    )
 
 
 def _handle_fig(fig: plt.Figure, path: Path, show: bool) -> None:
